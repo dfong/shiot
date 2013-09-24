@@ -2,9 +2,9 @@
 
 ### Synopsis
 
-	shiot [-C] [-hv] TEST_SUITE_FILE ...
+	shiot [-C] [-DThv] TEST_SUITE_FILE ...
 
-	shiot [-hv] < TEST_SUITE_FILE
+	shiot [-DThv] < TEST_SUITE_FILE
 
 ### Description
 
