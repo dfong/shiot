@@ -1,0 +1,36 @@
+# tests for shiot itself
+
+! shiot
+><STDIN>: OK (0 passed)
+?0
+
+# check that -C option works when file has no explicit directory
+! shiot -C good1 >/dev/null 2>&1
+?0
+
+# check that testfiles don't get run when -h is specified
+! shiot -h bad1 bad2 bad3 bad4 > /dev/null
+?0
+
+# check that various flags are accepted
+! shiot -C -D -d >/dev/null 2>&1
+?0
+
+# check that unknown option is rejected
+! shiot -z >/dev/null 2>&1
+?1
+
+! shiot good1 >/dev/null 2>&1
+?0
+
+! shiot bad1 >/dev/null 2>&1
+?1
+
+! shiot bad2 >/dev/null 2>&1
+?1
+
+! shiot bad3 >/dev/null 2>&1
+?1
+
+! shiot bad4 >/dev/null 2>&1
+?1

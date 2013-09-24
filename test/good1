@@ -1,0 +1,27 @@
+# tests for verifying the workings of shiot itself
+# all tests should pass
+
+# test exit status
+! exit 0
+?0
+
+# test of exit status
+! exit 1
+?1
+
+# test of stdout
+! echo hey huh ooh umm tell me what i say
+>hey huh ooh umm tell me what i say
+?0
+
+# test of stderr
+! echo 1>&2 feel so good
+/feel so good
+?0
+
+# test of stdin and stdout
+! cat
+<a test of stdin
+>a test of stdin
+?0
+

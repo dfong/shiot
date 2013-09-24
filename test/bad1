@@ -1,0 +1,4 @@
+# a test of shiot which should fail
+
+! exit 2
+?1

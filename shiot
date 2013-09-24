@@ -1,0 +1,513 @@
+#! /usr/bin/python
+# shell i/o tester.  runs a shell command with optional
+# input, then checks the output, stderr, and exit status.
+#
+#	shiot [-CDTdhv] [TESTFILES ...]
+#		-C	cd to dir of TESTFILE before running it
+#		-D	debug testcase
+#		-T	run doctests
+#		-d	debug shiot itself
+#		-h	print help message
+#		-v	test verbosely
+#
+# run all tests from the TESTFILES.  if no TESTFILES are named,
+# run tests from stdin.
+#
+# the format of a TESTFILE is as follows.
+# TESTFILE contains multiple testcases.
+# a testcase begins with a ! line.
+# blank lines and lines beginning with # are ignored.
+#
+# FIRST_CHAR    MEANING
+#   !           shell command line to run
+#   <		a line of input to the cmd
+#   >		a line of expected output from cmd
+#   /		a line of expected stderr from cmd
+#   ?		expected exit status from cmd
+#
+
+#
+# NOTE:
+# to run doctests, do "cp shiot shiot.py; python -m doctest shiot.py"
+#
+r'''
+doctest examples:
+>>> print 'more doctests are needed'
+more doctests are needed
+>>>
+'''
+
+import os, sys
+import re, subprocess, getopt, StringIO, operator
+
+DFLAG = False
+DEBUG = False
+TFLAG = False
+VERBOSE = False
+PROGNAME = os.path.basename(sys.argv[0])
+MYSTDERR = sys.stderr
+LINENO = None
+CFLAG = False
+ORIG_DIR = None
+
+def prog_error(msg):
+	print>>MYSTDERR, "%s: error: %s" % (PROGNAME, msg)
+
+#
+# split a string consisting of newline-terminated lines.
+# ordinary str.split() leaves an extra null line because it
+# treats newline as a separator rather than a terminator.
+#
+def splitlines(s):
+	r'''
+	doctest examples:
+	>>> print splitlines('')
+	[]
+	>>> print splitlines('\n')
+	['']
+	>>> print splitlines('\na\n')
+	['', 'a']
+	>>> print splitlines('\na\nb\n')
+	['', 'a', 'b']
+	>>> print splitlines('\n\n')
+	['', '']
+	'''
+	lines = s.split('\n')
+	if len(lines) > 0 and lines[-1] == '':
+		del lines[-1]
+	return lines
+
+def joinlines(lines):
+	r'''
+	doctest examples:
+	>>> print repr(joinlines([]))
+	''
+	>>> print repr(joinlines(['']))
+	'\n'
+	>>> print repr(joinlines(['a']))
+	'a\n'
+	>>> print repr(joinlines(['a', 'b']))
+	'a\nb\n'
+	'''
+	return ''.join([x+'\n' for x in lines])
+
+#
+# return true iff the string s looks like a "debugging output" line.
+# for now this means s starts with either DEBUG or #.
+#
+def is_debug_line(s):
+	r'''
+	doctest examples:
+	>>> print is_debug_line(" # xyz")
+	False
+	>>> print is_debug_line("# xyz")
+	True
+	>>> print is_debug_line("DEBUG: xyz")
+	True
+	'''
+	return s != None and s.startswith('#') or s.startswith('DEBUG:')
+
+#
+# do the standard thing when the check of stdout or stderr passed.
+#
+def report_check_passed(pref, actual):
+	global DFLAG
+	r'''
+	doctest examples:
+	>>> DFLAG=True
+	>>> report_check_passed("xxx", ["1", "2", "3"])
+	>>> report_check_passed("xxx", ["DEBUG: this is a line"])
+	----- Actual xxx (OK):
+	DEBUG: this is a line
+	-----
+	'''
+	if DFLAG and any(actual, is_debug):
+		#
+		# normally the output would not be printed when check passes.
+		# but if DFLAG is on, we print it anyway if there are
+		# any DEBUG lines.
+		#
+		print "----- Actual %s (OK):" % pref
+		for line in actual: print line
+		print "-----"
+
+def quick_check(actual, expected):
+	r'''
+	doctest examples:
+	>>> print quick_check([], [])
+	True
+	>>> print quick_check([""], [])
+	False
+	>>> print quick_check([], [""])
+	False
+	'''
+	if DFLAG:
+		actual = [x for x in actual if not is_debug_line(x)]
+	return actual == expected
+
+#
+# report the difference between actual and expected lines,
+# in a standard way.
+#
+def detailed_diff(actual, expected):
+	r'''
+	doctest examples:
+	>>> detailed_diff([], [])
+	>>> detailed_diff(["a"], [])
+	     1 =a
+	>>> detailed_diff([], ["b"])
+	   exp :b
+	>>> detailed_diff(["a", "b", "c"], [])
+	     1 =a
+	     2 =b
+	     3 =c
+	>>> detailed_diff(["a", "b", "c"], ["d"])
+	     1 =a
+	   exp :d
+	     2 =b
+	     3 =c
+	'''
+
+	# do one-to-one line comparisons until one array is exhausted
+	ia,ix = 0,0
+	lena, lenx = len(actual),len(expected)
+	while ia < lena and ix < lenx:
+		a = actual[ia]
+		ia += 1
+		x = expected[ix]
+		if DFLAG and is_debug_line(a):
+			# a debug line, print and skip it
+			print "%6s ?%s" % ('', a)
+			continue
+		if a != x:
+			# line comparison failed, so display
+			print "%6d =%s" % (ix+1, a)
+			print "%6s :%s" % ("exp", x)
+		ix += 1
+
+	# print any excess in actual lines.
+	if ia < lena:
+		for i in range(ia, lena):
+			a = actual[i]
+			if DFLAG and is_debug_line(a):
+				print "%6s =%s" % ('dbg', a)
+			else:
+				print "%6d =%s" % (i+1, a)
+	# print any excess in expected lines.
+	if ix < lenx:
+		for i in range(ix, lenx):
+			x = expected[i]
+			print "%6s :%s" % ("exp", x)
+
+def run3lines(cmd, inputlines):
+	(stat, out, err) = run3(cmd, joinlines(inputlines))
+	return (stat, splitlines(out), splitlines(err))
+
+def run3(cmd, input):
+	p = subprocess.Popen(cmd,
+		shell=True,
+		stdin=subprocess.PIPE,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE)
+
+	(out, err) = p.communicate(input)
+	stat = p.poll()
+	return (stat, out, err)
+
+def report_result(label, nfail, total, extra=''):
+
+	if nfail == 0:
+		print "%s: OK (%d passed%s)" % (label, total, extra)
+	else:
+		print "%s: FAIL (%d/%d failed%s)" % (label, nfail, total, extra)
+
+# class for gathering test stats
+class tstats:
+	def __init__(self, fname):
+		r'''
+		>>> stats = tstats("<test>")
+		>>> print stats.testno()
+		1
+		>>> print stats.nfailed()
+		0
+		>>> stats.testmsg("xxx")
+		Testcase <test> #1: xxx
+		>>> print stats.nfailed()
+		0
+		>>> stats.fail("yyyy")
+		Testcase <test> #1 failed: yyyy
+		>>> stats.advance()
+		Testcase <test> #1: result F
+		>>> print stats.testno()
+		2
+		>>> print stats.nfailed()
+		1
+		>>> stats.advance()
+		>>>
+		'''
+		self._testno = 1
+		self._nfailed = 0
+		self._curfail = False
+		self.fname = fname
+
+	def testno(self):
+		return self._testno
+
+	def nfailed(self):
+		return self._nfailed
+
+	def testmsg(self, msg):
+		print "Testcase %s #%d: %s" % (self.fname, self._testno, msg)
+
+	def advance(self):
+		if self._curfail:
+			print "Testcase %s #%d: result F" \
+			% (self.fname, self._testno)
+		else:
+			if VERBOSE: print "Testcase %s #%d: result OK" \
+			% (self.fname, self._testno)
+		self._testno += 1
+		if self._curfail:
+			self._nfailed += 1
+		self._curfail = False
+
+	def fail(self, msg):
+		print "Testcase %s #%d failed: %s" \
+			% (self.fname, self._testno, msg)
+		self._curfail = True
+
+	def total(self):
+		return (self._testno-1)
+
+	def results(self):
+		return (self.nfailed(), self.total())
+
+	def summary(self):
+		if VERBOSE: print ""
+		report_result(self.fname, self.nfailed(), self.total())
+
+class testrec:
+	def __init__(self):
+		self.cmd = None
+		self.cont = {}
+		for ltype in ['STDIN', 'STDOUT', 'STDERR']:
+			self.cont[ltype] = []
+		self._status = 0
+		self._skip = False
+
+	def handle_line(self, fname, line):
+		ltype = line[0]
+		if ltype not in "!?<>/":
+			prog_error("line %s %d: unknown type \"%s\""
+				% (fname, LINENO, ltype))
+			self._skip = True
+			return
+		if ltype == '?':
+			self.setstatus(line[1:])
+		else:
+			pref = {'<':'STDIN', '>':'STDOUT', '/':'STDERR'}[ltype]
+			self.add_cont(pref, line[1:].rstrip('\n'))
+
+	def add_cont(self, pref, line):
+		self.cont[pref].append(line)
+
+	def getcont(self, pref):
+		return self.cont[pref]
+
+	def setstatus(self, line):
+		self._status = int(line.strip())
+
+	def getstatus(self):
+		return self._status
+
+	def setskip(self, val):
+		self._skip = val
+
+	def getskip(self):
+		return self._skip
+
+	def setcmd(self, cmd):
+		self.cmd = cmd.strip()
+		self.lineno = LINENO
+
+	def getcmd(self):
+		return self.cmd
+
+	def check_cont(self, pref, actual):
+		expected = self.getcont(pref)
+
+		if quick_check(actual, expected):
+			report_check_passed(pref, actual)
+			return True
+
+		#
+		# comparison failed.
+		# report failure and print a detailed comparison
+		#
+		STATS.fail("on %s check [%s]" % (pref, self.getcmd()))
+		detailed_diff(actual, expected)
+		return False
+
+	def execute(self, STATS):
+		if self._skip:
+			STATS.fail("malformed test spec")
+			return
+
+		ret = True
+		cmd = self.getcmd()
+		xstat = self.getstatus()
+
+		if VERBOSE: STATS.testmsg("Executing: %s" % cmd)
+
+		(stat, outlines, errlines) = run3lines(cmd,
+			self.getcont('STDIN'))
+
+		if not self.check_cont('STDOUT', outlines):
+			ret = False
+		if not self.check_cont('STDERR', errlines):
+			ret = False
+		if stat != xstat:
+			STATS.fail("[%s] status=%d, expected=%d" \
+				% (cmd, stat, xstat))
+			ret = False
+		return ret
+
+def run_testcase(rec):
+	if rec.getcmd() == None: # silently ignore empty test record
+		return
+	rec.execute(STATS)
+	STATS.advance()
+
+def vchdir(dir):
+	if dir == '':
+		dir = '.'
+	if VERBOSE:
+		print "*** chdir %s" % dir
+	try:
+		os.chdir(dir)
+		return True
+	except OSError, e:
+		prog_error("chdir(%s) failed with %s" % (dir, e.strerror))
+		return False
+
+def readfile(fname):
+	f = open(fname, 'r')
+	if CFLAG:
+		if not vchdir(os.path.dirname(fname)):
+			return (1,1)
+	ret = readstream(f, fname)
+	if CFLAG:
+		if not vchdir(ORIG_DIR):
+			return (ret[0]+1, ret[1]+1)
+	f.close()
+	return ret
+
+def readstream(f, fname):
+	r'''
+	>>> readstream(StringIO.StringIO("! echo hello\n>hello\n?0\n"), "test")
+	test: OK (1 passed)
+	(0, 1)
+	>>> readstream(StringIO.StringIO("! exit 3\n?3\n"), "test")
+	test: OK (1 passed)
+	(0, 1)
+	'''
+	global LINENO
+	global STATS
+
+	STATS = tstats(fname)
+	LINENO = 0
+	rec = testrec()
+
+	if VERBOSE: print ""
+	if VERBOSE: print "*** Begin tests from %s" % fname
+	if VERBOSE: print ""
+	for line in f.readlines():
+		LINENO += 1
+		line = re.sub(r'^\s*', r'', line)
+		if DEBUG:
+			print>>MYSTDERR, "# %s %d [%s]" \
+				% (fname, LINENO, line.rstrip('\n'))
+		if line == "" or line.startswith('#'):
+			# skip comment lines but print if verbose
+			if VERBOSE:
+				print line.rstrip('\n')
+		elif line.startswith("!"):
+			run_testcase(rec)
+			rec = testrec()
+			rec.setcmd(line[1:])
+		else:
+			rec.handle_line(fname, line)
+	run_testcase(rec)
+	STATS.summary()
+	if VERBOSE: print ""
+	if VERBOSE: print "*** End tests on %s" % fname
+	return STATS.results()
+
+def usage():
+	print "usage: shiot [-CDTdhv] [TEST_SUITE_FILE ...]"
+	print "	-C	chdir to parent dir of each TEST_SUITE_FILE"
+	print "	-D	enable ignoring of debug output from test"
+	print "	-T	run doctest on shiot itself"
+	print "	-d	debug shiot itself"
+	print "	-h	print this help message and exit"
+	print "	-v	operate verbosely"
+
+def do_doctest():
+	global VERBOSE
+	import doctest
+	v = VERBOSE
+	VERBOSE = False
+	tstat = doctest.testmod(verbose=v).failed
+	exit(0 if tstat == 0 else 1)
+
+def doflags():
+	global VERBOSE
+	global CFLAG
+	global DEBUG
+	global DFLAG
+	global ORIG_DIR
+	global TFLAG
+
+	optlist, args = getopt.getopt(sys.argv[1:], 'CTDdhv')
+	for flag,val in optlist:
+		if flag == '-C':
+			CFLAG = True
+			ORIG_DIR = os.getcwd()
+		elif flag == '-D':
+			DFLAG = True
+		elif flag == '-d':
+			DEBUG = True
+		elif flag == '-v':
+			VERBOSE = True
+		elif flag == '-h':
+			usage()
+			exit(0)
+		elif flag == '-T':
+			TFLAG = True
+		else:
+			prog_error("unknown option %s" % flag)
+			exit(1)
+	return args
+
+def main():
+	args = doflags()
+
+	if TFLAG: do_doctest()
+
+	nargs = len(args)
+	if nargs <= 0:
+		(failsum,totsum) = readstream(sys.stdin, "<STDIN>")
+	else:
+		reslist = []
+		for arg in args:
+			res = readfile(arg)
+			reslist.append(res)
+		failsum = reduce(operator.add, (x[0] for x in reslist), 0)
+		totsum = reduce(operator.add, (x[1] for x in reslist), 0)
+		extra = " in %d files" % nargs
+		report_result("Global", failsum, totsum, extra)
+	sys.exit(0 if failsum == 0 else 1)
+
+if __name__ == "__main__":
+	main()
+

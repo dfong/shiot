@@ -1,0 +1,6 @@
+# a test of shiot which should fail due to excess stderr
+
+! echo hello 1>&2
+/hello
+/
+?0

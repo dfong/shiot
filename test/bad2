@@ -1,0 +1,6 @@
+# a test of shiot which should fail - excess expected output
+
+! echo hello
+>hello
+>
+?0
